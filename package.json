@@ -1,0 +1,55 @@
+{
+  "name": "prime-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Router for native Prime Agent orchestration: Astra coordinates Sol coding and Luna review",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "prime-agent",
+    "orchestration"
+  ],
+  "scripts": {
+    "test": "npm run typecheck && node --test tests/*.test.mjs",
+    "pack:check": "npm pack --dry-run",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/router.ts"
+    ],
+    "skills": [
+      "./skills/router"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions/router.ts",
+    "extensions/herdr.ts",
+    "bin/herdr-bind.mjs",
+    "skills/router/SKILL.md",
+    "README.md",
+    "GETTING_STARTED.md",
+    "ARCHITECTURE.md",
+    "LICENSE.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md"
+  ],
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.86.0",
+    "typescript": "7.0.2",
+    "@types/node": "^24.3.0"
+  },
+  "license": "MIT"
+}
