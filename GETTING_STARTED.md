@@ -1,75 +1,77 @@
 # Getting started
 
-[Overview](README.md) · [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE.md)
+[Overview](README.md) · [Architecture and diagrams](ARCHITECTURE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE.md)
 
-## Prerequisites
+## Before you install
 
-- A Prime Agent installation with native RLM subagents, package loading, and executable-model discovery for the optional `/router` preflight. Confirm capabilities against your installed Prime Agent, not this repository's development dependencies.
-- Access to your configured controller, author, and reviewer selectors. The built-in defaults are `openai-codex/gpt-6-astra`, `openai-codex/gpt-5.6-sol`, and `openai-codex/gpt-5.6-luna`, respectively. Access is account- and catalog-dependent; these instructions do not promise universal entitlement or a future release.
-- Node.js **22.19.0 or later** for development and test commands. The package's local dev dependency `@earendil-works/pi-coding-agent@0.86.0` supplies API/types for checks; **0.86.0 is not the version of the installed Prime Agent runtime**. One local runtime reported `prime-agent --version` as `0.9.6` and admitted native children with both built-in child selectors; this observation is not a supported-version range or a model-access guarantee.
+You need Prime Agent with package loading and native RLM children, plus account access to your chosen role models. The recommended lineup is controller `openai-codex/gpt-6-astra`, author `openai-codex/gpt-6-sol`, and reviewer `openai-codex/gpt-6-luna`. Each exact selector must appear in Prime's **live executable-model catalog**. A catalog entry alone does not prove that native child admission will succeed.
 
-## Install and activate
+The recommended lineup is not the current built-in lineup. The current source defaults are controller `openai-codex/gpt-6-astra`, author `openai-codex/gpt-5.6-sol`, and reviewer `openai-codex/gpt-5.6-luna`.
 
-From a shell, use the absolute path to the `prime-router` source checkout as `<package-directory>` (the checkout folder need not be renamed):
+## Install
 
-```sh
-prime-agent package install <package-directory>
-```
-
-This is the user-scope install. For one project, run from that project's root:
+Install from the public GitHub repository; no private-repository authentication is required:
 
 ```sh
-prime-agent package install <package-directory> --local
+prime-agent package install git:github.com/moreWax/prime-router
 ```
 
-`--local` installs into the current project instead of the user configuration. In a running Prime session, use `/reload` after installing or changing the package. Start/select the configured **controller** as the parent model (the built-in default is `openai-codex/gpt-6-astra`). Ask for a normal coding task; no command prefix is needed. Optionally use `/router <task>` to send an explicit task. The command refuses a parent whose active model does not match the effective controller and never switches the model or session.
+Or install a source checkout without renaming its folder:
 
-## Configure role models
+```sh
+prime-agent package install /absolute/path/to/prime-router
+```
 
-In a UI session, bare `/router` shows effective settings and opens a role/model picker. Choose a role, a native executable model, and either current-session override or saved future default; cancel leaves settings unchanged. Without a UI, bare `/router` shows status/help. `/router models` shows effective settings without the picker in either mode, including while busy. Use explicit commands:
+These are documented Prime Agent Git and directory package sources. They install to user settings by default. To install for one project, run either command from that project's root with `--local` at the end. The repository is public, but `package.json` sets `"private": true`, so npm publication is disabled. In an already running session, enter `/reload` to reload the installed extension after installation or edits **to that installed copy**. Updating a separate source checkout does not update an already installed Git package; update the installed package first. `/reload` does **not** restart Prime's daemon or session worker, upgrade the runtime, or add host APIs.
+
+In a supported **root** Prime session, select the effective controller model yourself. Then request an ordinary coding task; no `/router` prefix is required. `/router <task>` explicitly sends a task through the workflow after checking the executable child selectors. It will not change your parent session or active model. The extension disables routing in native children and sessions without a verified root header (`rlmDepth === 0`).
+
+## Configure roles
+
+Run `/router models` to see effective selectors and whether the active parent matches the controller. In a UI, bare `/router` also opens a role/model picker; without a UI it shows status and help. To apply the recommended GPT-6 lineup to the current session, first confirm all three exact selectors in the live executable-model catalog, then run:
 
 ```text
-/router model author provider/model-id
-/router model reviewer provider/model-id
-/router model controller provider/model-id
-/router default author provider/model-id
-/router reset author
+/router model controller openai-codex/gpt-6-astra
+/router model author openai-codex/gpt-6-sol
+/router model reviewer openai-codex/gpt-6-luna
+```
+
+Other explicit controls work in either mode:
+
+```text
+/router model <role> <provider/model-id>
+/router default <role> <provider/model-id>
+/router reset <role>
 /router reset all
 ```
 
-`/router model`, `/router reset`, and the picker’s current-session choice require an idle session. These changes affect later turns, not work already in flight. `/router default <controller|author|reviewer> <provider/model-id>` (or the picker’s saved-default choice) can run while busy and saves a default for **new sessions**, not the current session. Each session freezes its defaults when created; overrides are branch-local session metadata that persist across reload/resume. `/router reset <role|all>` clears current-session overrides back to **that session's frozen defaults**, not the latest saved defaults. Use `/reload` after installing or changing the extension; it does not turn saved future defaults into current-session defaults. Router does not automatically migrate saved defaults, frozen session defaults, or overrides when built-in selectors change. After upgrading, inspect `/router models`. If an old author or reviewer selector is only a session override, clear it with `/router reset author` or `/router reset reviewer`. Reset does not bypass a stale frozen default. For a stale frozen current session, use `/router model author openai-codex/gpt-5.6-sol` and `/router model reviewer openai-codex/gpt-5.6-luna`. Set future sessions explicitly with `/router default author openai-codex/gpt-5.6-sol` and `/router default reviewer openai-codex/gpt-5.6-luna`. Saved defaults live under Prime Agent’s agent directory at `router/models.json` (schema version 1, optional `defaults.controller`, `defaults.author`, and `defaults.reviewer` selectors). Current-session metadata is separate. The file and session data can reveal your provider/model choices; do not put secrets in selectors. Invalid syntax, roles, or selectors produce an error rather than an automatic substitute; an explicit selector must appear in Prime’s executable-model catalog. A malformed saved defaults file is reported and never overwritten silently. It blocks new session snapshots and saved-default writes; an existing session with a valid frozen snapshot can still use its snapshot and current-session controls. Repair the file before saving future defaults. Changing the configured controller does **not** change the active parent model. Select the matching parent model yourself before delegation. Router requires an explicit root-session header `rlmDepth === 0`. Native children (`rlmDepth > 0`) are disabled even when their model matches. Older or unknown-depth sessions can lack a valid header and may not support configuration or automatic routing; start a supported root session rather than editing session data.
+Replace `provider/model-id` with an exact selector shown in Prime's **live executable-model catalog**. Model overrides and resets need an idle session and affect later turns, not in-flight work. `/router default <role> <provider/model-id>` may run while busy but changes **only new sessions**. A session freezes its defaults at creation, and branch-local overrides survive reload/resume. `/router reset <role|all>` clears overrides back to that session's **frozen defaults**, not recently saved defaults. Router does not automatically migrate defaults, session snapshots, or overrides when built-in selectors change. Changing the configured controller never switches your active parent model.
 
-## Show native children in Herdr (opt-in)
+After an upgrade, check `/router models`. If old selectors are overrides, reset them only if the frozen defaults are suitable. If frozen defaults are stale, use `/router model` with the recommended GPT-6 selectors above, or choose other selectors from the live executable catalog. Use the corresponding `/router default` commands only when you want those selectors for future sessions. Saved defaults are in Prime Agent's agent directory under `router/models.json`; a malformed file blocks new snapshots and saved-default writes rather than being silently overwritten. Existing valid frozen snapshots can still use current-session controls. Do not put secrets in model selectors.
 
-In a genuine Herdr terminal attached to your **existing root controller Prime session**, enter:
+## If a child cannot start
+
+1. Check `/router models` and select the matching controller parent model yourself.
+2. Run `prime-agent model list` for a catalog view. A listing does **not** prove native child authorization. The `/router <task>` preflight requires Prime's `modelRegistry.getExecutableModels()` and both effective child selectors in its live results; if discovery fails, it sends no task.
+3. For a more precise diagnosis, in the current controller Python REPL run `await rlm.find_models("<model-id>")` for author and reviewer. Exact `rlm.spawn(..., model="provider/model-id")` admission is authoritative. Do not substitute an unapproved model silently.
+
+The ordinary-language workflow relies on the controller making decisions after native child follow-ups. A missing follow-up or failed admission can stop progress. Inspect the run checkpoint and native child status rather than treating silence as success; see [Architecture](ARCHITECTURE.md).
+
+## Optional Herdr child viewers (advanced integration)
+
+This bridge is **off by default** and is not required for Router. In a genuine Herdr terminal attached to your existing **root controller session**, enter:
 
 ```text
 /router herdr on
-```
-
-That is the normal setup. Router uses the command's actual attached-client context from an updated Prime host: the invoking Herdr workspace/tab/pane and socket plus the Prime daemon socket and executable launcher for this session. You do **not** need to copy a root session ID, socket path, launcher path, package path, or descriptor. The command will not use stale process environment as a substitute. The host must expose the optional command-only `getInvokingClientContext()` API. Update the **Prime source runtime** and restart both the daemon and this session’s worker through Prime’s supported lifecycle; then resume the **same saved session** before trying the new command. A daemon restart alone can leave its old worker running. `/reload` only reloads the extension and cannot add the host API. Source or package edits do not upgrade processes that are already running. No exact published version or release availability is claimed. Do not use unverified stop/resume commands; confirm the lifecycle for your installation first. If a legacy binding was made with inherited context but no saved caller context, run `/router herdr off` from its **original Herdr environment** before enabling the one-command binding; do not overwrite it from a different client. If Prime lacks the API, Router asks you to update Prime Agent and retry from Herdr; if there is no Herdr invoking client, it asks you to invoke the command from your Herdr terminal. Do not switch to a different session or provide credentials to fix either case. Windows viewer shell execution is not supported.
-
-### Advanced troubleshooting only
-
-If you need the older explicit transport path and the extension already has genuine inherited Herdr context, `/router herdr on <absolute-prime-daemon-socket> <absolute-prime-launcher>` remains available. When attaching an existing root without inherited context, the packaged `bin/herdr-bind.mjs` helper can still create a private descriptor from the genuine Herdr pane, followed by `/router herdr bind <absolute-descriptor-path>` in that **same root**. These are not recommended setup steps and do not replace the one-command path. They require exact context for the same live root and daemon; do not guess or copy values from another session. Paths with spaces in explicit command arguments are unsupported. A descriptor expires after 120 seconds, is atomically claimed once and deleted even on validation or sync failure, and rejects wrong roots, symlinks, and unsafe permissions. There is no automatic fallback to the descriptor when bare `on` fails. See [Security](SECURITY.md) for its same-user trust limit.
-
-Other controls in that root session:
-
-```text
 /router herdr status
 /router herdr sync
 /router herdr off
 ```
 
-`on` (bare or explicit) or `bind` attempts an initial reconciliation. If it fails with no owned viewers, the bridge returns to off; if owned viewers remain, it preserves ownership for explicit cleanup. Before opening child panes, the public Prime CLI list must confirm this same live top-level root session on the selected daemon, and Herdr must confirm the caller pane. The enabled state, transport binding, caller context (from bare `on` or `bind`), and owned-pane registry are saved in branch-local session metadata. `status` reports enablement and owned viewer count, not a history of errors; command failures report errors. `sync` requests a manual reconciliation if a parent event was missed. `off` disables reconciliation and closes **only verified Router-owned panes**, not unrelated Herdr panes or Prime children. After resolving an error, inspect `status`: if on, try `sync`; if off, retry bare `on` from the attached Herdr terminal. Advanced explicit binding may require a fresh descriptor. Role-model settings are unchanged.
+Bare `on` uses authenticated invoking-client metadata from Prime's optional command-scoped `getInvokingClientContext()` host API. It does not ask for or infer a session ID, socket, launcher, or pane. The API must exist in the **running daemon and affected session worker**. If you changed Prime source, restart both through your installation's supported lifecycle and resume the **same saved session**; restarting only the daemon can leave an old worker. `/reload` only reloads Router. No exact released host version is claimed. Missing API or Herdr caller fails with guidance, not an environment guess. A legacy inherited-context binding should be turned off from its original Herdr environment before using bare `on` elsewhere.
 
-Each verified live **direct** Prime child is represented by its own pane that attaches to that child's **existing session** on the verified Prime daemon; the pane is a viewer, not a new model agent. Router checks native children using the public Prime CLI list. A role is assigned only when the child's exact model uniquely matches the configured author or reviewer; otherwise the label is `worker`. Pane metadata uses the child's actual name and model. Reconciliation runs after supported parent `tool_execution_end` and `agent_end` events, not by polling. Child-only changes may remain stale until the next parent event or manual `sync`; immediate terminal visibility is not promised. The intended result is separate entries in **Herdr's Agents sidebar**, but sidebar registration and recognition remain **unverified** until you run a live Herdr test. Do not treat a pane or dashboard entry alone as proof.
+`on` attempts an initial sync. `status` reports opt-in, tracked viewer records (**not currently verified ownership**), deferred count, observed activity, last successful sync, and fixed error categories; it hides transport paths. `sync` retries after missed parent events. `off` closes only panes with exact verified Router ownership; it can drop a proven-absent viewer record. A freshly split pane racing `off` might remain untagged and require manual recovery, rather than risk closing an unowned pane.
 
+Each eligible live **direct** child gets a viewer pane attached to its existing native session, not a second agent. At most eight tracked viewers retain their slots; later children are deferred, not a global sync failure. After a verified viewer disappears, Router recreates it only if successful strict workspace inventory for the bound caller proves the pane absent. Inventory errors, missing caller origin, and mismatched ownership fail closed or retain the record; do not force a replacement by guessing. Child activity is reported as `working` **only** if native `isStreaming` or `isCompacting` is explicitly true; otherwise it is `unknown`, not inferred `idle` or `done`. Updates occur on supported parent events and can lag until another event or manual `sync`. The intended Herdr **Agents sidebar** entry per child is **not yet verified by a live Herdr test**; pane creation alone is not proof. This inventory behavior was checked against Herdr **0.9.1, protocol 22** and mocked tests, not a live Herdr control session. The bridge does not change role models or the active parent session. See [Architecture](ARCHITECTURE.md) and [Security](SECURITY.md) for trust and lifecycle limits.
 
-## Check models if delegation cannot start
-
-1. Use `/router models` to inspect effective role selectors. Run `prime-agent model list` to inspect catalog entries. A listed model is **not** proof that a native child spawn is allowed.
-2. In the controller's Python REPL, use `await rlm.find_models("<model-id>")` to diagnose author and reviewer availability. Match exact `provider/model-id` selectors. The actual `rlm.spawn(..., model="provider/model-id")` admission is authoritative.
-3. `/router <task>` checks the live executable-model catalog for both effective child selectors before sending a task. If discovery is unavailable, fails, or omits a selector, it reports the issue and starts no task. Ordinary-task delegation still depends on native spawn admission. Check authorization and model discovery; do not silently replace a missing selector.
-
-A successful source test does not establish live account authorization or a future Prime release's behavior. If a run pauses, consult its checkpoint and native child status rather than assuming the reviewer finished. [Architecture](ARCHITECTURE.md) covers recovery; [Security](SECURITY.md) covers local artifacts.
+**Troubleshooting only:** `/router herdr on <absolute-prime-daemon-socket> <absolute-prime-launcher>` retains an explicit path when genuine inherited Herdr context exists. The packaged `bin/herdr-bind.mjs` helper plus `/router herdr bind <absolute-descriptor-path>` can bind an existing root from its genuine Herdr pane. These paths require the same live root and daemon, not guessed or borrowed values; bare `on` never falls back to them. Explicit command paths with spaces are unsupported. The descriptor expires after 120 seconds and is claimed once. Windows viewer shell execution is not supported. Follow [Security](SECURITY.md) before using either advanced path.

@@ -1,29 +1,49 @@
 # Prime Router
 
-`prime-router` is a Prime Agent capability package that guides an existing controller session through coding work. The built-in role models are **`openai-codex/gpt-6-astra` as controller**, **`openai-codex/gpt-5.6-sol` as code author**, and **`openai-codex/gpt-5.6-luna` as reviewer/test runner**. Configure roles with `/router`; effective role models can differ from the built-ins. No shadow agent or replacement parent session is started. The workflow is inspired by pi-analyst-worker-orchestrator, but does not include or execute that extension.
+Prime Router is a **Prime Agent capability package** for coding work in your existing controller session. It guides the controller to use **native, visible Prime children** for implementation and review. Ask for a change in ordinary language; `/router` is optional.
 
-[Getting started](GETTING_STARTED.md) · [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE.md)
+## Recommended model lineup
 
-## Use
+| Role | Recommended selector | Job |
+| --- | --- | --- |
+| Controller | `openai-codex/gpt-6-astra` | Plan, delegate, check evidence, and answer in the current parent session |
+| Author | `openai-codex/gpt-6-sol` | Implement and run focused checks |
+| Reviewer | `openai-codex/gpt-6-luna` | Review and run tests; instructed not to edit |
 
-Install this package in Prime Agent, select the controller model, and ask for a coding change in ordinary language. **`/router` is optional.** See [Getting started](GETTING_STARTED.md) for installation scopes, `/reload`, and model-access checks. Availability of configured model selectors depends on your Prime installation, live catalog, and account access; no model is silently substituted.
+Apply the lineup to the current session with exact selectors:
 
-On a controller turn, the extension supplies the bundled workflow. The controller can create a run checkpoint in `.router/runs/<run-id>/state.json`, ask the configured author to implement, inspect the result, ask the configured reviewer to review and run checks, then request bounded author fixes. It reports results or an operator blocker. Simple noncoding questions do not need children. [Architecture](ARCHITECTURE.md) describes the hooks and native follow-ups.
+```text
+/router model controller openai-codex/gpt-6-astra
+/router model author openai-codex/gpt-6-sol
+/router model reviewer openai-codex/gpt-6-luna
+```
 
-Role settings are explicit: `/router model <controller|author|reviewer> <provider/model-id>` overrides a role in the current session; `/router default <role> <provider/model-id>` saves a default for **new** sessions; `/router reset <role|all>` restores frozen defaults in the current session. `/router models` shows effective settings. Current-session changes require an idle session and affect later turns, not in-flight work. See [Getting started](GETTING_STARTED.md) for UI and non-UI use. Changing the controller setting never switches the active model.
+Use these selectors only when all three appear in Prime's **live executable-model catalog** and your account can run them. `/router model controller` configures Router but does not switch the active parent model; select the matching controller in Prime. Router never silently substitutes a model.
 
-Router does not migrate saved settings or session metadata when built-in selectors change. After upgrading, inspect `/router models`. Use `/router reset author` and `/router reset reviewer` only to clear session overrides; reset still restores that session’s frozen defaults. Use `/router default author openai-codex/gpt-5.6-sol` and `/router default reviewer openai-codex/gpt-5.6-luna` for new sessions. If the frozen defaults in the current session are stale, use the corresponding `/router model` commands for that session.
+This is the **recommended configuration**, not the current source defaults. The current built-ins are controller `openai-codex/gpt-6-astra`, author `openai-codex/gpt-5.6-sol`, and reviewer `openai-codex/gpt-5.6-luna`.
 
-## Optional Herdr child panes
+[Getting started](GETTING_STARTED.md) · [Architecture and diagrams](ARCHITECTURE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE.md)
 
-Herdr integration is **off by default**. In a genuine Herdr terminal attached to your existing Prime **root** controller session, enter `/router herdr on`. Router takes the invoking client's Herdr pane and Prime daemon/launcher context from the updated Prime host; you do not paste a session ID, socket, launcher, or descriptor. Use `/router herdr status` to inspect state, `/router herdr sync` after a missed event, and `/router herdr off` to disable the bridge and close only verified Router-owned panes. This needs updated Prime **source runtime code** in both the daemon and the affected session worker. Restarting the daemon alone may leave an old worker running; use Prime’s supported lifecycle to restart that worker and resume the same saved session before enabling the bridge. `/reload` only reloads Router and cannot add a host API. No published release or version is promised. Existing processes are not upgraded by source edits. For a legacy contextless inherited binding, use `/router herdr off` from its original Herdr environment before switching to one-command setup. If the capability or Herdr caller is missing, the command fails with guidance instead of guessing from process environment. Explicit transport arguments and the terminal bind helper remain advanced troubleshooting options, not normal setup. See [Getting started](GETTING_STARTED.md).
+## Start in a minute
 
-The integration aims to show **each native direct child in Herdr's Agents sidebar**, not just a dashboard. For each verified child, it creates a separate Herdr pane that **attaches to the same native Prime child session**; it does not spawn another model agent or replace the parent. A pane alone does not prove Herdr has registered or recognized an Agents-sidebar row. This requires a later live test in Herdr; it has **not** been verified here. Child updates are event-driven snapshots and can lag until the next parent event; they are not guaranteed real-time. Herdr does not change `/router model`, `/router default`, or the active session model.
+Install directly from the public GitHub repository using Prime Agent's documented Git package source:
 
-This is **prompt-guided orchestration**, not a deterministic job scheduler. Continuation needs Prime's native child reply/exit follow-ups and the controller's decisions. The reviewer's prompt-based read-only role is not a permission boundary; use separate worktree or tool restrictions where needed. Run artifacts can contain sensitive task text and logs. See [Security](SECURITY.md).
+```sh
+prime-agent package install git:github.com/moreWax/prime-router
+```
 
-## Development
+Or install a checked-out copy with `prime-agent package install /absolute/path/to/prime-router`. Add `--local` to either command from a project root for a project-scoped install; otherwise the install is user-scoped. In a running session, use `/reload` to load the installed extension after installation or edits to its installed copy; update an installed Git package separately. `/reload` does **not** upgrade the Prime daemon, its session worker, or host APIs.
 
-Run `npm test` and `npm run pack:check` in the source checkout. These check types, mock extension behavior, validate package contents, and dry-run packing; they do not prove live model admission or end-to-end orchestration. See [Contributing](CONTRIBUTING.md).
+Select the effective controller model in a **root** Prime session, then ask for a coding task, such as “Add input validation and tests for this endpoint.” For an explicit task, use `/router <task>`. If delegation is unavailable, inspect `/router models` and the live executable-model catalog; an exact native child spawn is the final access check. See [Getting started](GETTING_STARTED.md) for setup and troubleshooting.
 
-The `prime-router` package manifest lists the extension, workflow skill, and all linked documentation, including the unchanged [MIT license](LICENSE.md), for packing. Check the actual tarball before distribution.
+## What it does
+
+- Supplies a per-turn workflow to the existing matching controller. The controller may checkpoint a run in `.router/runs/<run-id>/state.json`, spawn an author, inspect the diff, request a reviewer/test run, and ask for bounded fixes. Simple noncoding questions need no child.
+- Lets you set role selectors with `/router model <role> <provider/model-id>` for this session, `/router default <role> <provider/model-id>` for **new** sessions, and `/router reset <role|all>` to clear current overrides back to **this session's frozen defaults**. `/router models` shows the effective settings. Router does not migrate old saved settings or frozen snapshots when built-ins change.
+- Offers an **optional, default-off Herdr bridge** for viewer panes attached to existing native direct children. From a genuine Herdr terminal attached to the root, use `/router herdr on`, then `/router herdr status|sync|off`. It requires Prime's optional invoking-client host API in both the running daemon and session worker; source changes and `/reload` alone cannot supply that API. The bridge retains up to eight tracked child viewers and defers excess children instead of failing the whole sync. It only recreates a missing viewer after strict successful workspace inventory proves absence; ownership mismatches remain for manual recovery. The goal is one child per Herdr Agents-sidebar entry, but **live sidebar recognition is unverified**. See [Getting started](GETTING_STARTED.md) and [Architecture](ARCHITECTURE.md).
+
+## Limits and status
+
+Router is **prompt-guided orchestration**, not a job scheduler or a replacement parent session. It depends on the controller's decisions and Prime's native child reply/exit follow-ups. It does not launch shadow agents, switch the parent model, guarantee autonomous continuation when a follow-up is missing, or enforce reviewer read-only access as a permission boundary. An optional Herdr viewer is not another model agent; event-driven updates may lag. Check [Security](SECURITY.md) before handling sensitive tasks or enabling Herdr.
+
+Source tests and pack checks cover types, mocked behavior, and package contents. They **do not** prove live child admission, model entitlement, or Herdr sidebar behavior. The GitHub repository is public, but `package.json` sets `"private": true`, so npm publication remains disabled. No release version is claimed here. See [Contributing](CONTRIBUTING.md) for checks.

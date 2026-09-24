@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, chmodSync, symlinkSync, mkdtempSync, mkdir
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { consumeDescriptor } from "../extensions/herdr.ts";
-import { HerdrBridge, caller, directChildren, decodeSnapshot, roleFor, quote } from "../extensions/herdr.ts";
+import { boundedCLIToFile, HerdrBridge, caller, cli, directChildren, decodeSnapshot, parseCLIJSON, parsePipedCLIJSON, roleFor, quote, unlinkOpenDescriptor } from "../extensions/herdr.ts";
 
 const root = "root-1", sid = "child-1";
 const binding = { socket: "/tmp/prime-explicit.sock", launcher: "/bin/sh" };
@@ -15,25 +15,131 @@ const parent = { sessionId: root, rlmDepth: 0, runtimeKind: "top-level", lifecyc
 const child = { sessionId: sid, parentSessionId: root, rlmDepth: 1, rlmChildId: "sub-1", runtimeKind: "subagent", lifecycle: "live", sessionName: "sol-fix", cwd: "/tmp", model: { provider: "acme", id: "sol" } };
 function mock() {
   const calls = [], panes = new Map([["w1:p1", { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", tokens: {} }]]);
-  let sessions = [parent, child], failure;
+  let sessions = [parent, child], failure, nextPane = 2;
   const transport = async (binary, args, metadata) => {
     calls.push([binary, args, metadata]);
     if (binary === binding.launcher) { assert.deepEqual(args, ["list", "--json", "--daemon-socket", binding.socket]); return { sessions }; }
     assert.equal(binary, "herdr");
     const [group, command, ...rest] = args;
     assert.equal(group, "pane");
+    if (command === "list") {
+      assert.deepEqual(rest, ["--workspace", "w1"]);
+      if (failure === "list") { failure = undefined; throw Error("mock inventory failed"); }
+      return { result: { type: "pane_list", panes: [...panes.values()].map((pane) => ({
+        ...pane, terminal_id: `terminal-${pane.pane_id}`, focused: pane.pane_id === "w1:p1",
+        agent_status: "unknown", revision: 0,
+      })) } };
+    }
     if (command === "get") { if (failure === command) { failure = undefined; throw Error("mock get failed"); } return { result: { pane: panes.get(rest[0]) } }; }
-    if (command === "split") { assert.deepEqual(rest.slice(0, 2), ["--pane", "w1:p1"]); const pane = { pane_id: "w1:p2", tab_id: "w1:t1", workspace_id: "w1", tokens: {} }; panes.set(pane.pane_id, pane); return { result: { pane } }; }
+    if (command === "split") { assert.deepEqual(rest.slice(0, 2), ["--pane", "w1:p1"]); const pane = { pane_id: `w1:p${nextPane++}`, tab_id: "w1:t1", workspace_id: "w1", tokens: {} }; panes.set(pane.pane_id, pane); return { result: { pane } }; }
     const pane = panes.get(rest[0]);
     if (failure === command) { failure = undefined; throw Error(`mock ${command} failed`); }
     if (command === "report-metadata") { for (let i=1;i<rest.length;i++) if (rest[i] === "--token") pane.tokens.router_owner = rest[i+1].split("=")[1]; return { result: {} }; }
-    if (command === "run") { assert.match(rest[1], /^exec '\/bin\/sh' attach 'child-1' --daemon-socket '\/tmp\/prime-explicit\.sock'$/); return { result: {} }; }
-    if (command === "report-agent") { assert.ok(rest.includes("unknown")); return { result: {} }; }
+    if (command === "run") { assert.match(rest[1], /^exec '\/bin\/sh' attach 'child-[A-Za-z0-9-]+' --daemon-socket '\/tmp\/prime-explicit\.sock'$/); return { result: {} }; }
+    if (command === "report-agent") { assert.ok(["unknown", "working"].includes(rest[rest.indexOf("--state") + 1])); return { result: {} }; }
     if (command === "close") { panes.delete(rest[0]); return { result: {} }; }
     throw Error(`unsupported: ${command}`);
   };
   return { calls, panes, transport, setSessions: (value) => { sessions = value; }, fail: (name) => { failure = name; } };
 }
+
+test("CLI captures a large Prime roster without relying on a stdout pipe", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "router-cli-json-"));
+  const script = join(dir, "prime-list");
+  try {
+    writeFileSync(script, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({ sessions: [], padding: "x".repeat(128 * 1024) }));
+`);
+    chmodSync(script, 0o700);
+    const response = await cli(script, ["list", "--json", "--daemon-socket", "/private/daemon.sock"]);
+    assert.deepEqual(response.sessions, []);
+    assert.equal(response.padding.length, 128 * 1024);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test("malformed CLI diagnostics identify the operation without echoing output or paths", () => {
+  assert.throws(
+    () => parseCLIJSON("/private/prime-agent", ["list", "--json", "--daemon-socket", "/private/daemon.sock"], '{"secret":"do-not-echo"'),
+    (error) => {
+      assert.match(error.message, /^Malformed JSON from Prime list --json \(received [0-9]+ bytes; response omitted\)$/);
+      assert.doesNotMatch(error.message, /do-not-echo|private|daemon\.sock/);
+      return true;
+    },
+  );
+});
+
+
+test("file transport closes its descriptor when anonymous unlink fails", () => {
+  let closes = 0;
+  assert.throws(
+    () => unlinkOpenDescriptor(42, () => { throw Error("unlink denied"); }, (fd) => { assert.equal(fd, 42); closes++; }),
+    /unlink denied/,
+  );
+  assert.equal(closes, 1);
+});
+
+test("file transport reports a nonzero child exit without exposing stderr", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "router-cli-nonzero-"));
+  const script = join(dir, "fixture.mjs");
+  writeFileSync(script, `process.stderr.write("private diagnostic"); process.exit(7);
+`);
+  try {
+    await assert.rejects(
+      boundedCLIToFile(process.execPath, [script], process.env, { timeoutMs: 10_000, responseBytes: 32 * 1024 }),
+      (error) => {
+        assert.match(error.message, /failed \(exit 7\)/);
+        assert.doesNotMatch(error.message, /private diagnostic/);
+        return true;
+      },
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("file transport times out a child that does not exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "router-cli-timeout-"));
+  const script = join(dir, "fixture.mjs");
+  writeFileSync(script, `setInterval(() => {}, 1000);
+`);
+  try {
+    await assert.rejects(
+      boundedCLIToFile(process.execPath, [script], process.env, { timeoutMs: 500, responseBytes: 32 * 1024 }),
+      /timed out/,
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("file transport enforces stdout and stderr response limits", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "router-cli-limits-"));
+  const script = join(dir, "fixture.mjs");
+  writeFileSync(script, `
+const stream = process.argv[2] === "stdout" ? process.stdout : process.stderr;
+stream.write("x".repeat(64 * 1024));
+`);
+  const run = (mode) => boundedCLIToFile(
+    process.execPath,
+    [script, mode],
+    process.env,
+    { timeoutMs: 10_000, responseBytes: 32 * 1024 },
+  );
+  try {
+    await assert.rejects(run("stdout"), /stdout response limit/);
+    await assert.rejects(run("stderr"), /stderr response limit/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("malformed read-only JSON retries once; mutation JSON never retries", async () => {
+  let reads = 0;
+  const read = await parsePipedCLIJSON("herdr", ["pane", "list", "--workspace", "w1"], async () =>
+    ++reads === 1 ? '{"result":' : '{"result":{"type":"pane_list","panes":[]}}');
+  assert.equal(reads, 2);
+  assert.equal(read.result.type, "pane_list");
+
+  let mutations = 0;
+  await assert.rejects(
+    parsePipedCLIJSON("herdr", ["pane", "close", "w1:p2"], async () => { mutations++; return '{"result":'; }),
+    /Malformed JSON from Herdr pane close/,
+  );
+  assert.equal(mutations, 1);
+});
 
 test("caller rejects outside Herdr, missing socket, wrong tab, and nonexecutable launcher", () => {
   assert.throws(() => caller({}, root, binding), /HERDR_ENV/);
@@ -68,16 +174,18 @@ test("missing ownership token never closes an existing pane", async () => {
   const m = mock(), b = new HerdrBridge(m.transport, env);
   await b.on(root, models, binding);
   m.panes.get("w1:p2").tokens.router_owner = "different-owner";
-  await b.off(root);
+  await assert.rejects(b.off(root), /ownership missing or mismatched/);
   assert.equal(m.panes.has("w1:p2"), true);
+  assert.equal(b.viewers.size, 1);
   assert.equal(m.calls.filter(([, args]) => args[1] === "close").length, 0);
 });
-test("split metadata failure closes only its freshly created pane", async () => {
+test("split metadata failure retains orphan without unverified closure", async () => {
   const m = mock(), b = new HerdrBridge(m.transport, env);
   m.fail("report-metadata");
   await assert.rejects(b.on(root, models, binding), /mock report-metadata failed/);
-  assert.equal(m.panes.has("w1:p2"), false);
-  assert.equal(b.viewers.size, 0);
+  assert.equal(m.panes.has("w1:p2"), true);
+  assert.equal(b.viewers.size, 1);
+  await assert.rejects(b.off(root), /ownership missing or mismatched/);
 });
 test("terminal child removal closes verified viewer; wrong daemon parent creates none", async () => {
   const m = mock(), b = new HerdrBridge(m.transport, env);
@@ -281,4 +389,125 @@ test("contextless explicit-on snapshot fails closed instead of adopting a new in
   assert.deepEqual(restored.snapshot(), before);
   assert.equal(m.calls.length, callCount);
   await restored.off(root);
+});
+
+test("nine children retain eight owned viewers, defer newcomer, and fill vacated slot", async () => {
+  const m = mock(), b = new HerdrBridge(m.transport, env);
+  const children = Array.from({ length: 9 }, (_, i) => ({ ...child, rlmChildId: `sub-${i}`, sessionId: `child-${i}` }));
+  m.setSessions([parent, ...children]);
+  await b.on(root, models, binding);
+  assert.equal(b.viewers.size, 8);
+  assert.equal(b.deferred, 1);
+  const first = b.viewers.get("sub-0").pane;
+  m.setSessions([parent, ...children.slice(1)]);
+  await b.sync(root, models);
+  assert.equal(m.panes.has(first), false);
+  assert.equal(b.viewers.size, 8);
+  assert.equal(b.deferred, 0);
+  assert.ok(b.viewers.has("sub-8"));
+  assert.equal(m.calls.filter(([, args]) => args[1] === "close").length, 1);
+});
+test("report-agent refreshes observed streaming state, never claims done or blocked", async () => {
+  const m = mock(), b = new HerdrBridge(m.transport, env);
+  await b.on(root, models, binding);
+  m.setSessions([parent, { ...child, isStreaming: true }]);
+  await b.sync(root, models);
+  m.setSessions([parent, { ...child, isStreaming: false, isCompacting: false }]);
+  await b.sync(root, models);
+  const states = m.calls.filter(([, args]) => args[1] === "report-agent").map(([, args]) => args[args.indexOf("--state") + 1]);
+  assert.deepEqual(states, ["unknown", "working", "unknown"]);
+  assert.match(b.status(), /observed activity: 0 working, 1 unknown/);
+});
+test("missing or mismatched pane retains ownership, never closes another pane", async () => {
+  const m = mock(), b = new HerdrBridge(m.transport, env);
+  await b.on(root, models, binding);
+  m.panes.get("w1:p2").tokens.router_owner = "different-owner";
+  await assert.rejects(b.sync(root, models), /ownership missing or mismatched/);
+  assert.equal(b.viewers.size, 1);
+  assert.match(b.status(), /last error: ownership mismatch/);
+  assert.equal(m.calls.filter(([, args]) => args[1] === "close").length, 0);
+  await assert.rejects(b.off(root), /ownership missing or mismatched/);
+  assert.equal(b.viewers.size, 1);
+});
+test("transport failure reports error then successful sync clears it", async () => {
+  const m = mock(), b = new HerdrBridge(m.transport, env);
+  await b.on(root, models, binding);
+  m.fail("get");
+  await assert.rejects(b.sync(root, models), /mock get failed/);
+  assert.match(b.status(), /last error: sync failed/);
+  await b.sync(root, models);
+  assert.match(b.status(), /last error: none/);
+  assert.match(b.status(), /last successful sync: 20/);
+});
+test("off during split prevents all later viewer setup calls", async () => {
+  const m = mock(); let release;
+  const b = new HerdrBridge(async (binary, args, scoped) => {
+    if (args[1] === "split") await new Promise((resolve) => { release = resolve; });
+    return m.transport(binary, args, scoped);
+  }, env);
+  const on = b.on(root, models, binding);
+  while (!release) await new Promise((resolve) => setImmediate(resolve));
+  const off = b.off(root);
+  release();
+  await on;
+  await assert.rejects(off, /ownership missing or mismatched/);
+  assert.equal(m.calls.filter(([, args]) => ["report-metadata", "run", "report-agent", "close"].includes(args[1])).length, 0);
+  assert.equal(b.viewers.size, 1);
+});
+
+test("status never renders transport error content, credentials, or paths with spaces", async () => {
+  const secret = "credential secret /private/path with spaces; server payload";
+  const m = mock(), b = new HerdrBridge(async (binary, args, scoped) => {
+    if (args[1] === "report-metadata") throw Error(secret);
+    return m.transport(binary, args, scoped);
+  }, env);
+  await assert.rejects(b.on(root, models, binding), /credential secret/);
+  const status = b.status();
+  assert.match(status, /viewer setup failed|sync failed/);
+  assert.match(status, /ownership not currently verified/);
+  assert.doesNotMatch(status, /credential|private|server payload|prime-explicit/);
+  assert.equal(b.viewers.size, 1);
+});
+
+test("authoritative workspace inventory recreates proven missing viewer without closing it", async () => {
+  const m = mock(), b = new HerdrBridge(m.transport, env);
+  await b.on(root, models, binding);
+  m.panes.delete("w1:p2");
+  await b.sync(root, models);
+  assert.equal(b.viewers.size, 1);
+  assert.equal(b.viewers.get("sub-1").pane, "w1:p3");
+  assert.equal(m.calls.filter(([, args]) => args[1] === "close").length, 0);
+});
+test("off drops only proven absent pane record, without closing unrelated panes", async () => {
+  const m = mock(), b = new HerdrBridge(m.transport, env);
+  await b.on(root, models, binding);
+  m.panes.delete("w1:p2");
+  await b.off(root);
+  assert.equal(b.viewers.size, 0);
+  assert.equal(m.panes.has("w1:p1"), true);
+  assert.equal(m.calls.filter(([, args]) => args[1] === "close").length, 0);
+});
+test("malformed, wrong workspace, missing origin, and failed inventories retain ownership", async () => {
+  for (const kind of ["malformed", "wrong-workspace", "missing-origin", "error"]) {
+    const m = mock(); let alter = false;
+    const b = new HerdrBridge(async (binary, args, scoped) => {
+      if (alter && args[1] === "list") {
+        if (kind === "error") throw Error("permission denied, not absence");
+        const base = await m.transport(binary, args, scoped);
+        if (kind === "malformed") return { result: { type: "pane_list", panes: [{ pane_id: "w1:p1" }] } };
+        if (kind === "wrong-workspace") base.result.panes[0].workspace_id = "w2";
+        if (kind === "missing-origin") base.result.panes = base.result.panes.filter((pane) => pane.pane_id !== "w1:p1");
+        return base;
+      }
+      return m.transport(binary, args, scoped);
+    }, env);
+    await b.on(root, models, binding);
+    m.panes.delete("w1:p2"); alter = true;
+    await assert.rejects(b.sync(root, models), /inventory|permission denied/);
+    assert.equal(b.viewers.get("sub-1").pane, "w1:p2");
+    assert.equal(m.calls.filter(([, args]) => args[1] === "split").length, 1);
+    assert.equal(m.calls.filter(([, args]) => args[1] === "close").length, 0);
+    await assert.rejects(b.off(root), /inventory|permission denied/);
+    assert.equal(b.viewers.size, 1);
+  }
 });

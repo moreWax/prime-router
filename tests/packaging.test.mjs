@@ -26,10 +26,25 @@ test("manifest and lockfile preserve private MIT package and supported Node floo
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url)));
   assert.equal(pkg.private, true);
   assert.equal(pkg.license, "MIT");
+  assert.equal(pkg.type, "module");
   assert.equal(pkg.engines.node, ">=22.19.0");
-  assert.equal(lock.packages[""].engines.node, pkg.engines.node);
-  assert.equal(lock.packages[""].license, pkg.license);
-  assert.equal(lock.packages[""].version, pkg.version);
+  assert.deepEqual(pkg.repository, {
+    type: "git",
+    url: "git+https://github.com/moreWax/prime-router.git",
+  });
+  assert.equal(pkg.homepage, "https://github.com/moreWax/prime-router#readme");
+  assert.deepEqual(pkg.bugs, { url: "https://github.com/moreWax/prime-router/issues" });
+  assert.deepEqual(pkg.pi, {
+    extensions: ["./extensions/router.ts"],
+    skills: ["./skills/router"],
+  });
+  assert.equal(pkg.peerDependencies["@earendil-works/pi-coding-agent"], "*");
+  assert.equal(pkg.peerDependenciesMeta["@earendil-works/pi-coding-agent"].optional, true);
+  assert.equal(lock.name, pkg.name);
+  assert.equal(lock.version, pkg.version);
+  for (const field of ["name", "version", "license", "engines", "devDependencies", "peerDependencies", "peerDependenciesMeta"]) {
+    assert.deepEqual(lock.packages[""][field], pkg[field], `lockfile root ${field} differs from package.json`);
+  }
   assert.deepEqual([...pkg.files].sort(), expectedFiles.filter((path) => path !== "package.json"));
 });
 
@@ -41,7 +56,11 @@ test("npm pack includes only the intended runtime and documentation files", () =
   });
   const packs = JSON.parse(output);
   assert.equal(packs.length, 1);
-  assert.deepEqual(packs[0].files.map((file) => file.path).sort(), expectedFiles);
+  const files = packs[0].files.map((file) => file.path).sort();
+  assert.deepEqual(files, expectedFiles);
+  for (const path of files) {
+    assert.doesNotMatch(path, /(?:^|\/)(?:\.prime|\.router|\.astra|node_modules|tests?|logs?)(?:\/|$)|\.(?:log|tgz)$/i);
+  }
 });
 
 test("local documentation links resolve to packed files", () => {
@@ -56,4 +75,24 @@ test("local documentation links resolve to packed files", () => {
       assert.ok(packed.has(relative(root, destination)), `${doc}: link not packed ${target}`);
     }
   }
+});
+
+test("architecture includes a closed Mermaid diagram", () => {
+  const architecture = readFileSync(resolve(root, "ARCHITECTURE.md"), "utf8");
+  const fences = [...architecture.matchAll(/^(`{3,}|~{3,})([^\n]*)\n/gm)];
+  let mermaidDiagrams = 0;
+  let open;
+  for (const [, marker, info] of fences) {
+    if (open) {
+      assert.equal(marker[0], open.marker[0], "architecture fence delimiter differs");
+      assert.ok(marker.length >= open.marker.length, "architecture closing fence is too short");
+      assert.equal(info.trim(), "", "architecture closing fence has an info string");
+      open = undefined;
+    } else {
+      if (/^mermaid(?:\s|$)/i.test(info.trim())) mermaidDiagrams++;
+      open = { marker };
+    }
+  }
+  assert.equal(open, undefined, "architecture code fence was not closed");
+  assert.ok(mermaidDiagrams > 0, "architecture lacks a Mermaid diagram");
 });

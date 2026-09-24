@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "description": "Router for native Prime Agent orchestration: Astra coordinates Sol coding and Luna review",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moreWax/prime-router.git"
+  },
+  "homepage": "https://github.com/moreWax/prime-router#readme",
+  "bugs": {
+    "url": "https://github.com/moreWax/prime-router/issues"
+  },
   "type": "module",
   "keywords": [
     "pi-package",

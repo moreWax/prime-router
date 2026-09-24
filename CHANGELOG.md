@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Harden opt-in Herdr reconciliation against missing viewers and cleanup races: validate a successful caller-workspace inventory before recreating or dropping a viewer, retain ownership mismatches for manual recovery, keep up to eight existing viewers and defer excess children, and report `working` only for positive native streaming/compaction signals. Status now shows tracked unverified records, deferred count, observed activity, last success and fixed error categories without transport paths. Validated with Herdr 0.9.1/protocol 22 source/schema and mock tests; a live Agents-sidebar test remains outstanding.
+- Improve private-repository packaging documentation: Git and checkout installation, role and host prerequisites, verification limits, architecture links, and contribution checks. Source checks and packing do not imply publication or live Herdr sidebar validation.
 - Change the built-in author and reviewer selectors to `openai-codex/gpt-5.6-sol` and `openai-codex/gpt-5.6-luna`; keep the controller at `openai-codex/gpt-6-astra` and preserve explicit saved and session settings.
 - Rename the package to `prime-router` (Router), the optional command to `/router`, and the workflow paths to `extensions/router.ts`, `skills/router/SKILL.md`, and `.router/runs/`. Astra/Sol/Luna remain the built-in exact role selectors; configured effective models may differ.
 - Add `/router` role/model selection, `/router models` effective view, current-session overrides, saved defaults for new sessions, and reset to frozen session defaults. Configuration does not switch the parent model or bypass native admission.

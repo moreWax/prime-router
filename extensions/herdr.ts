@@ -1,8 +1,9 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, lstatSync, openSync, readFileSync, closeSync, renameSync, unlinkSync, rmdirSync, fstatSync } from "node:fs";
-import { dirname, basename } from "node:path";
+import { accessSync, constants, lstatSync, openSync, readFileSync, readSync, closeSync, renameSync, unlinkSync, rmdirSync, fstatSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
+import { tmpdir } from "node:os";
 
 const execute = promisify(execFile);
 const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
@@ -70,9 +71,105 @@ export function caller(env: Environment, session: string, binding: Binding) {
   return { workspace: workspace!, tab: tab!, pane: pane!, socket, launcher, session };
 }
 
+const commandName = (binary: string, args: string[]) => {
+  if (binary === "herdr" && args[0] === "pane" && typeof args[1] === "string") return `Herdr pane ${args[1]}`;
+  if (args[0] === "list" && args[1] === "--json") return "Prime list --json";
+  return "CLI command";
+};
+const readOnlyHerdrJSON = (binary: string, args: string[]) =>
+  binary === "herdr" && args[0] === "pane" && ["get", "list"].includes(args[1] ?? "");
+export function parseCLIJSON(binary: string, args: string[], stdout: string): unknown {
+  try { return JSON.parse(stdout); }
+  catch {
+    throw new Error(`Malformed JSON from ${commandName(binary, args)} (received ${Buffer.byteLength(stdout, "utf8")} bytes; response omitted)`);
+  }
+}
+const CLI_TIMEOUT_MS = 10000;
+const CLI_RESPONSE_LIMIT = 8 * 1024 * 1024;
+
+// Keep this small helper injectable so unlink-failure cleanup can be tested
+// without changing the production transport policy.
+export function unlinkOpenDescriptor(fd: number, remove: () => void, close: (fd: number) => void = closeSync) {
+  try { remove(); }
+  catch (error) {
+    try { close(fd); } catch { /* preserve the unlink error */ }
+    throw error;
+  }
+}
+
+/** Testable primitive. The production cli always supplies the fixed limits above. */
+export async function boundedCLIToFile(
+  binary: string, args: string[], env: NodeJS.ProcessEnv,
+  limits: Readonly<{ timeoutMs: number; responseBytes: number }> = { timeoutMs: CLI_TIMEOUT_MS, responseBytes: CLI_RESPONSE_LIMIT },
+): Promise<string> {
+  // Direct the large roster to a file descriptor instead of retaining a pipe
+  // buffer. Poll its size while the child runs and independently count stderr.
+  const path = join(tmpdir(), `router-prime-list-${randomUUID()}`);
+  const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
+  let open = true;
+  try {
+    unlinkOpenDescriptor(fd, () => unlinkSync(path));
+  } catch (error) {
+    open = false;
+    try { unlinkSync(path); } catch { /* best-effort removal after close */ }
+    throw error;
+  }
+  try {
+    const child = spawn(binary, args, { env, stdio: ["ignore", fd, "pipe"] });
+    let failure: "timeout" | "stdout" | "stderr" | undefined;
+    let stderrBytes = 0;
+    const terminate = (reason: typeof failure) => {
+      if (!failure) { failure = reason; child.kill("SIGKILL"); }
+    };
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderrBytes += Buffer.byteLength(chunk);
+      if (stderrBytes > limits.responseBytes) terminate("stderr");
+    });
+    const timer = setTimeout(() => terminate("timeout"), limits.timeoutMs);
+    const monitor = setInterval(() => {
+      try { if (fstatSync(fd).size > limits.responseBytes) terminate("stdout"); }
+      catch { /* the final descriptor operations report any filesystem error */ }
+    }, 5);
+    const { code, signal } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    }).finally(() => { clearTimeout(timer); clearInterval(monitor); });
+    const size = fstatSync(fd).size;
+    if (failure === "timeout") throw new Error("Prime list --json timed out");
+    if (failure === "stdout" || size > limits.responseBytes) throw new Error("Prime list --json exceeded the stdout response limit");
+    if (failure === "stderr" || stderrBytes > limits.responseBytes) throw new Error("Prime list --json exceeded the stderr response limit");
+    if (code !== 0) throw new Error(`Prime list --json failed (${signal ? "terminated by signal" : `exit ${code}`})`);
+    const output = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const count = readSync(fd, output, offset, size - offset, offset);
+      if (count === 0) throw new Error("Prime list --json response ended before its reported size");
+      offset += count;
+    }
+    return output.toString("utf8");
+  } finally { if (open) closeSync(fd); }
+}
+
+export async function parsePipedCLIJSON(binary: string, args: string[], invoke: () => Promise<string>): Promise<unknown> {
+  // Retry only side-effect-free Herdr inventory reads after an incomplete pipe;
+  // never retry a pane mutation whose response was lost.
+  for (let attempt = 0; ; attempt++) {
+    const stdout = await invoke();
+    try { return parseCLIJSON(binary, args, stdout); }
+    catch (error) {
+      const incomplete = stdout.trim() === "" || !/[}\]]$/.test(stdout.trimEnd());
+      if (attempt === 0 && incomplete && readOnlyHerdrJSON(binary, args)) continue;
+      throw error;
+    }
+  }
+}
+
 export const cli: Transport = async (binary, args, env) => {
-  const { stdout } = await execute(binary, args, { timeout: 10000, maxBuffer: 8 * 1024 * 1024, env: env ? { ...process.env, ...onlyHerdr(env) } : process.env });
-  return JSON.parse(stdout);
+  const processEnv = env ? { ...process.env, ...onlyHerdr(env) } : process.env;
+  if (args[0] === "list" && args[1] === "--json" && args[2] === "--daemon-socket" && args.length === 4)
+    return parseCLIJSON(binary, args, await boundedCLIToFile(binary, args, processEnv));
+  const options = { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_RESPONSE_LIMIT, env: processEnv };
+  return parsePipedCLIJSON(binary, args, async () => (await execute(binary, args, options)).stdout);
 };
 function result(data: unknown): any {
   if (!data || typeof data !== "object" || !Object.hasOwn(data, "result")) throw new Error("Unexpected Herdr response");
@@ -89,6 +186,9 @@ export function directChildren(list: unknown, parent: string) {
         typeof s.sessionName !== "string" || !s.sessionName || typeof s.cwd !== "string" || !s.cwd.startsWith("/"))
       throw new Error("Live direct child lacks authoritative identity, model, name, or cwd");
   }
+  if (new Set(children.map((s: any) => s.rlmChildId)).size !== children.length ||
+      new Set(children.map((s: any) => s.sessionId)).size !== children.length)
+    throw new Error("Prime direct child roster contains duplicate identities");
   return children;
 }
 export function roleFor(model: string, selected: {author: string; reviewer: string}) {
@@ -100,6 +200,10 @@ export class HerdrBridge {
   private pending?: Promise<void>;
   private dirty = false;
   private generation = 0;
+  lastSuccess?: number;
+  lastError?: string;
+  deferred = 0;
+  readonly activity = new Map<string, "working" | "unknown">();
   binding?: Binding;
   context?: Context;
   private readonly transport: Transport;
@@ -113,29 +217,69 @@ export class HerdrBridge {
   snapshot(): HerdrSnapshot { return { version: 1, enabled: this.enabled, binding: this.binding, context: this.context,
     viewers: [...this.viewers.values()] }; }
   private save() { this.persist(this.snapshot()); }
-  status() { return `Herdr ${this.enabled ? "on" : "off"}; ${this.viewers.size} owned viewer pane(s). Event-driven sync follows parent tool/turn completion; child-only transitions await the next parent event.`; }
+  status() {
+    const binding = this.binding ? "Prime transport: bound (socket and launcher paths hidden)" : "Prime transport: unbound";
+    const observed = [...this.activity.values()].reduce((counts, state) => { counts[state]++; return counts; }, { working: 0, unknown: 0 });
+    return `Herdr ${this.enabled ? "on" : "off"}; ${binding}; caller pane: ${this.context?.env.HERDR_PANE_ID && ID.test(this.context.env.HERDR_PANE_ID) ? this.context.env.HERDR_PANE_ID : "unverified"}; tracked viewers (ownership not currently verified): ${this.viewers.size}/8; deferred: ${this.deferred}; observed activity: ${observed.working} working, ${observed.unknown} unknown; Agents sidebar: unverified; last successful sync: ${this.lastSuccess ? new Date(this.lastSuccess).toISOString() : "never"}; last error: ${this.lastError ?? "none"}. Event-driven sync follows parent tool/turn completion; child-only transitions await the next parent event.`;
+  }
   private current(session: string) {
     if (this.context && this.context.root !== session) throw new Error("Router Herdr context belongs to another root session");
     return caller(this.context?.env ?? this.env, session, this.binding!);
   }
   private async herdr(...args: string[]) { return result(await this.transport("herdr", args, this.context?.env)); }
+  // Herdr 0.9.1 protocol 22: pane.list --workspace returns
+  // {result:{type:"pane_list",panes:PaneInfo[]}} on success. Its server-side
+  // workspace filter rejects an unknown workspace rather than returning [].
+  private async inventory(c: ReturnType<typeof caller>): Promise<Map<string, any>> {
+    const response = await this.herdr("pane", "list", "--workspace", c.workspace);
+    if (!response || response.type !== "pane_list" || !Array.isArray(response.panes))
+      throw new Error("Invalid Herdr workspace pane inventory");
+    const panes = new Map<string, any>();
+    for (const pane of response.panes) {
+      if (!pane || typeof pane.pane_id !== "string" || !ID.test(pane.pane_id) ||
+          !pane.pane_id.startsWith(`${c.workspace}:`) || pane.workspace_id !== c.workspace ||
+          typeof pane.tab_id !== "string" || !ID.test(pane.tab_id) || !pane.tab_id.startsWith(`${c.workspace}:`) ||
+          typeof pane.terminal_id !== "string" || !pane.terminal_id ||
+          typeof pane.focused !== "boolean" || typeof pane.agent_status !== "string" ||
+          !Number.isSafeInteger(pane.revision) || pane.revision < 0 ||
+          (pane.tokens !== undefined && (!pane.tokens || typeof pane.tokens !== "object" || Array.isArray(pane.tokens) ||
+            Object.values(pane.tokens).some((value) => typeof value !== "string"))) || panes.has(pane.pane_id))
+        throw new Error("Invalid Herdr workspace pane inventory");
+      panes.set(pane.pane_id, pane);
+    }
+    if (panes.get(c.pane)?.tab_id !== c.tab)
+      throw new Error("Herdr workspace pane inventory does not contain the bound caller pane");
+    return panes;
+  }
   private async verifyPane(c: ReturnType<typeof caller>, v: Viewer) {
     const pane = await this.herdr("pane", "get", v.pane);
     return pane?.pane?.pane_id === v.pane && pane.pane.tab_id === v.tab && pane.pane.workspace_id === c.workspace && pane.pane.tokens?.router_owner === v.owner;
   }
   private async release(c: ReturnType<typeof caller>, v: Viewer) {
-    if (await this.verifyPane(c, v)) await this.herdr("pane", "close", v.pane);
-    this.viewers.delete(v.child); this.save();
+    if (!(await this.verifyPane(c, v))) throw new Error(`Pane ${v.pane} ownership missing or mismatched; retained for manual recovery`);
+    await this.herdr("pane", "close", v.pane);
+    this.viewers.delete(v.child); this.activity.delete(v.child); this.save();
   }
   async off(session: string) {
     const c = this.current(session);
     ++this.generation; this.enabled = false; this.save();
     const errors: string[] = [];
     if (this.pending) { try { await this.pending; } catch (e) { errors.push(`pending sync: ${String(e)}`); } }
-    for (const v of [...this.viewers.values()]) {
-      try { await this.release(c, v); } catch (e) { errors.push(`${v.pane}: ${String(e)}`); }
+    let panes: Map<string, any> | undefined;
+    if (this.viewers.size) {
+      try { panes = await this.inventory(c); }
+      catch (e) { errors.push(`inventory: ${String(e)}`); }
     }
-    if (errors.length) throw new Error(`Owned pane cleanup failed: ${errors.join("; ")}`);
+    if (panes) for (const v of [...this.viewers.values()]) {
+      try {
+        if (!panes.has(v.pane)) { this.viewers.delete(v.child); this.activity.delete(v.child); this.save(); }
+        else await this.release(c, v);
+      } catch (e) { errors.push(`${v.pane}: ${String(e)}`); }
+    }
+    if (errors.length) {
+      this.lastError = "owned pane cleanup failed; missing or mismatched ownership retained for manual recovery";
+      throw new Error(`Owned pane cleanup failed: ${errors.join("; ")}`);
+    }
     if (!this.viewers.size) { this.context = undefined; this.save(); }
   }
   async on(session: string, selected: {author: string; reviewer: string}, binding: Binding) {
@@ -192,7 +336,7 @@ export class HerdrBridge {
       } while (this.dirty && this.enabled && this.generation === generation);
     };
     const task = run();
-    this.pending = task.finally(() => { this.pending = undefined; });
+    this.pending = task.then(() => {}, (error) => { this.lastError = /ownership missing or mismatched|changed native session identity/.test(String(error)) ? "ownership mismatch or child identity change; retained for manual recovery" : "sync failed (transport, schema, or server error); retry after checking diagnostics"; throw error; }).finally(() => { this.pending = undefined; });
     return this.pending;
   }
   private async reconcile(session: string, selected: {author: string; reviewer: string}, generation: number) {
@@ -202,15 +346,26 @@ export class HerdrBridge {
       throw new Error("Herdr caller pane does not match inherited workspace/tab/pane");
     const response = await this.transport(c.launcher, ["list", "--json", "--daemon-socket", c.socket], this.context?.env);
     const children = directChildren(response, session);
-    if (children.length > 8) throw new Error("Router Herdr viewer limit is 8 direct children");
+    const panes = await this.inventory(c); // Validate complete bound workspace before any mutation.
+    // Keep existing owned viewers in their slots. New children fill remaining slots
+    // in the daemon's roster order; never reorder panes to favor a newcomer.
     const seen = new Set<string>(children.map((s: any) => s.rlmChildId));
-    for (const v of [...this.viewers.values()]) if (!seen.has(v.child)) await this.release(c, v);
+    for (const v of [...this.viewers.values()]) if (!seen.has(v.child)) {
+      if (!this.enabled || this.generation !== generation) return;
+      if (!panes.has(v.pane)) { this.viewers.delete(v.child); this.activity.delete(v.child); this.save(); }
+      else await this.release(c, v);
+    }
+    this.deferred = 0;
     for (const s of children) {
       if (!this.enabled || this.generation !== generation) return;
       const model = `${s.model.provider}/${s.model.id}`;
       const label = `${roleFor(model, selected)}: ${s.sessionName} | ${model}`;
       let v = this.viewers.get(s.rlmChildId);
-      if (v && !(await this.verifyPane(c, v))) { this.viewers.delete(s.rlmChildId); this.save(); v = undefined; }
+      if (v && v.session !== s.sessionId) throw new Error(`Child ${s.rlmChildId} changed native session identity; retained pane ${v.pane} for manual recovery`);
+      if (v && !panes.has(v.pane)) { this.viewers.delete(v.child); this.activity.delete(v.child); this.save(); v = undefined; }
+      if (v && !(await this.verifyPane(c, v))) throw new Error(`Pane ${v.pane} ownership missing or mismatched; retained for manual recovery`);
+      if (!this.enabled || this.generation !== generation) return;
+      if (!v && this.viewers.size >= 8) { this.deferred++; continue; }
       if (!v) {
         const created = await this.herdr("pane", "split", "--pane", c.pane, "--direction", "right", "--cwd", s.cwd, "--no-focus");
         const pane = created?.pane?.pane_id;
@@ -218,31 +373,28 @@ export class HerdrBridge {
           throw new Error("Herdr split returned a pane outside the caller tab");
         v = { pane, tab: c.tab, session: s.sessionId, child: s.rlmChildId, source: `router-${randomUUID()}`, owner: randomUUID() };
         this.viewers.set(v.child, v); this.save();
+        if (!this.enabled || this.generation !== generation) return;
         try {
+          if (!this.enabled || this.generation !== generation) return;
           await this.herdr("pane", "report-metadata", pane, "--source", v.source, "--title", label, "--display-agent", label, "--token", `router_owner=${v.owner}`);
           const command = `exec ${quote(c.launcher)} attach ${quote(s.sessionId)} --daemon-socket ${quote(c.socket)}`;
+          if (!this.enabled || this.generation !== generation) return;
           await this.herdr("pane", "run", pane, command);
-          // This is a viewer of an existing native session. Presence is known;
-          // the child's execution state is not, so never claim idle/working/done.
-          await this.herdr("pane", "report-agent", pane, "--source", v.source, "--agent", "prime-agent", "--state", "unknown", "--agent-session-id", s.sessionId);
+          if (!this.enabled || this.generation !== generation) return;
         } catch (error) {
-          try {
-            if (await this.verifyPane(c, v)) await this.release(c, v);
-            else {
-              // The split response proves this fresh pane was created by this invocation.
-              // Metadata may have failed before the ownership token was installed.
-              const fresh = await this.herdr("pane", "get", v.pane);
-              if (fresh?.pane?.pane_id === v.pane && fresh.pane.tab_id === c.tab && fresh.pane.workspace_id === c.workspace && !fresh.pane.tokens?.router_owner) {
-                await this.herdr("pane", "close", v.pane);
-                this.viewers.delete(v.child); this.save();
-              }
-            }
-          } catch { /* retain ownership record for explicit cleanup */ }
+          // Never close a pane without an exact matching owner token. A failed
+          // metadata call can leave an orphan; retain the record for recovery.
+          this.lastError = "viewer setup failed; ownership unverified and record retained for manual recovery";
           throw error;
         }
       } else {
         await this.herdr("pane", "report-metadata", v.pane, "--source", v.source, "--title", label, "--display-agent", label);
       }
+      if (!this.enabled || this.generation !== generation) return;
+      const state = s.isStreaming === true || s.isCompacting === true ? "working" : "unknown";
+      await this.herdr("pane", "report-agent", v.pane, "--source", v.source, "--agent", "prime-agent", "--state", state, "--agent-session-id", s.sessionId);
+      this.activity.set(v.child, state);
     }
+    if (this.enabled && this.generation === generation) { this.lastSuccess = Date.now(); this.lastError = undefined; }
   }
 }
